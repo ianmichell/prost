@@ -5,32 +5,33 @@ use syn::{Ident, Lit, Meta, MetaNameValue, NestedMeta};
 
 use crate::field::{scalar, set_option, tag_attr};
 
+// Renamed from MapTy because it contained the module name
 #[derive(Clone, Debug)]
-pub enum MapTy {
+pub enum Ty {
     HashMap,
     BTreeMap,
 }
 
-impl MapTy {
-    fn from_str(s: &str) -> Option<MapTy> {
+impl Ty {
+    fn from_str(s: &str) -> Option<Ty> {
         match s {
-            "map" | "hash_map" => Some(MapTy::HashMap),
-            "btree_map" => Some(MapTy::BTreeMap),
+            "map" | "hash_map" => Some(Ty::HashMap),
+            "btree_map" => Some(Ty::BTreeMap),
             _ => None,
         }
     }
 
     fn module(&self) -> Ident {
         match *self {
-            MapTy::HashMap => Ident::new("hash_map", Span::call_site()),
-            MapTy::BTreeMap => Ident::new("btree_map", Span::call_site()),
+            Ty::HashMap => Ident::new("hash_map", Span::call_site()),
+            Ty::BTreeMap => Ident::new("btree_map", Span::call_site()),
         }
     }
 
     fn lib(&self) -> TokenStream {
         match self {
-            MapTy::HashMap => quote! { std },
-            MapTy::BTreeMap => quote! { prost::alloc },
+            Ty::HashMap => quote! { std },
+            Ty::BTreeMap => quote! { prost::alloc },
         }
     }
 }
@@ -46,7 +47,7 @@ fn fake_scalar(ty: scalar::Ty) -> scalar::Field {
 
 #[derive(Clone)]
 pub struct Field {
-    pub map_ty: MapTy,
+    pub map_ty: Ty,
     pub key_ty: scalar::Ty,
     pub value_ty: ValueTy,
     pub tag: u32,
@@ -63,7 +64,7 @@ impl Field {
             } else if let Some(map_ty) = attr
                 .path()
                 .get_ident()
-                .and_then(|i| MapTy::from_str(&i.to_string()))
+                .and_then(|i| Ty::from_str(&i.to_string()))
             {
                 let (k, v): (String, String) = match attr {
                     Meta::NameValue(MetaNameValue {
@@ -128,7 +129,7 @@ impl Field {
     }
 
     /// Returns a statement which encodes the map field.
-    pub fn encode(&self, ident: TokenStream) -> TokenStream {
+    pub fn encode(&self, ident: &TokenStream) -> TokenStream {
         let tag = self.tag;
         let key_mod = self.key_ty.module();
         let ke = quote!(::prost::encoding::#key_mod::encode);
@@ -182,7 +183,7 @@ impl Field {
 
     /// Returns an expression which evaluates to the result of merging a decoded key value pair
     /// into the map.
-    pub fn merge(&self, ident: TokenStream) -> TokenStream {
+    pub fn merge(&self, ident: &TokenStream) -> TokenStream {
         let key_mod = self.key_ty.module();
         let km = quote!(::prost::encoding::#key_mod::merge);
         let module = self.map_ty.module();
@@ -218,7 +219,7 @@ impl Field {
     }
 
     /// Returns an expression which evaluates to the encoded length of the map.
-    pub fn encoded_len(&self, ident: TokenStream) -> TokenStream {
+    pub fn encoded_len(&self, ident: &TokenStream) -> TokenStream {
         let tag = self.tag;
         let key_mod = self.key_ty.module();
         let kl = quote!(::prost::encoding::#key_mod::encoded_len);
@@ -252,7 +253,7 @@ impl Field {
         }
     }
 
-    pub fn clear(&self, ident: TokenStream) -> TokenStream {
+    pub fn clear(ident: &TokenStream) -> TokenStream {
         quote!(#ident.clear())
     }
 
@@ -262,8 +263,8 @@ impl Field {
             let key_ty = self.key_ty.rust_type();
             let key_ref_ty = self.key_ty.rust_ref_type();
 
-            let get = Ident::new(&format!("get_{}", ident), Span::call_site());
-            let insert = Ident::new(&format!("insert_{}", ident), Span::call_site());
+            let get = Ident::new(&format!("get_{ident}"), Span::call_site());
+            let insert = Ident::new(&format!("insert_{ident}"), Span::call_site());
             let take_ref = if self.key_ty.is_numeric() {
                 quote!(&)
             } else {
@@ -271,11 +272,10 @@ impl Field {
             };
 
             let get_doc = format!(
-                "Returns the enum value for the corresponding key in `{}`, \
-                 or `None` if the entry does not exist or it is not a valid enum value.",
-                ident,
+                "Returns the enum value for the corresponding key in `{ident}`, \
+                 or `None` if the entry does not exist or it is not a valid enum value."
             );
-            let insert_doc = format!("Inserts a key value pair into `{}`.", ident);
+            let insert_doc = format!("Inserts a key value pair into `{ident}`.");
             Some(quote! {
                 #[doc=#get_doc]
                 pub fn #get(&self, key: #key_ref_ty) -> ::core::option::Option<#ty> {
@@ -295,14 +295,14 @@ impl Field {
     ///
     /// The Debug tries to convert any enumerations met into the variants if possible, instead of
     /// outputting the raw numbers.
-    pub fn debug(&self, wrapper_name: TokenStream) -> TokenStream {
+    pub fn debug(&self, wrapper_name: &TokenStream) -> TokenStream {
         let type_name = match self.map_ty {
-            MapTy::HashMap => Ident::new("HashMap", Span::call_site()),
-            MapTy::BTreeMap => Ident::new("BTreeMap", Span::call_site()),
+            Ty::HashMap => Ident::new("HashMap", Span::call_site()),
+            Ty::BTreeMap => Ident::new("BTreeMap", Span::call_site()),
         };
 
         // A fake field for generating the debug wrapper
-        let key_wrapper = fake_scalar(self.key_ty.clone()).debug(quote!(KeyWrapper));
+        let key_wrapper = fake_scalar(self.key_ty.clone()).debug(&quote!(KeyWrapper));
         let key = self.key_ty.rust_type();
         let value_wrapper = self.value_ty.debug();
         let libname = self.map_ty.lib();
@@ -388,13 +388,13 @@ impl ValueTy {
         }
     }
 
-    /// Returns a newtype wrapper around the ValueTy for nicer debug.
+    /// Returns a newtype wrapper around the `ValueTy` for nicer debug.
     ///
     /// If the contained value is enumeration, it tries to convert it to the variant. If not, it
     /// just forwards the implementation.
     fn debug(&self) -> TokenStream {
         match self {
-            ValueTy::Scalar(ty) => fake_scalar(ty.clone()).debug(quote!(ValueWrapper)),
+            ValueTy::Scalar(ty) => fake_scalar(ty.clone()).debug(&quote!(ValueWrapper)),
             ValueTy::Message => quote!(
                 fn ValueWrapper<T>(v: T) -> T {
                     v

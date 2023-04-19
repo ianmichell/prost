@@ -70,7 +70,7 @@ impl Field {
         }
     }
 
-    pub fn encode(&self, ident: TokenStream) -> TokenStream {
+    pub fn encode(&self, ident: &TokenStream) -> TokenStream {
         let tag = self.tag;
         match self.label {
             Label::Optional => quote! {
@@ -89,7 +89,7 @@ impl Field {
         }
     }
 
-    pub fn merge(&self, ident: TokenStream) -> TokenStream {
+    pub fn merge(&self, ident: &TokenStream) -> TokenStream {
         match self.label {
             Label::Optional => quote! {
                 ::prost::encoding::group::merge(
@@ -109,7 +109,7 @@ impl Field {
         }
     }
 
-    pub fn encoded_len(&self, ident: TokenStream) -> TokenStream {
+    pub fn encoded_len(&self, ident: &TokenStream) -> TokenStream {
         let tag = self.tag;
         match self.label {
             Label::Optional => quote! {
@@ -124,11 +124,10 @@ impl Field {
         }
     }
 
-    pub fn clear(&self, ident: TokenStream) -> TokenStream {
+    pub fn clear(&self, ident: &TokenStream) -> TokenStream {
         match self.label {
             Label::Optional => quote!(#ident = ::core::option::Option::None),
-            Label::Required => quote!(#ident.clear()),
-            Label::Repeated => quote!(#ident.clear()),
+            Label::Required | Label::Repeated => quote!(#ident.clear()),
         }
     }
 }

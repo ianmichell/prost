@@ -31,7 +31,7 @@ impl Field {
     ///
     /// If the meta items are invalid, an error will be returned.
     /// If the field should be ignored, `None` is returned.
-    pub fn new(attrs: Vec<Attribute>, inferred_tag: Option<u32>) -> Result<Option<Field>, Error> {
+    pub fn new(attrs: &[Attribute], inferred_tag: Option<u32>) -> Result<Option<Field>, Error> {
         let attrs = prost_attrs(attrs);
 
         // TODO: check for ignore attribute.
@@ -57,7 +57,7 @@ impl Field {
     ///
     /// If the meta items are invalid, an error will be returned.
     /// If the field should be ignored, `None` is returned.
-    pub fn new_oneof(attrs: Vec<Attribute>) -> Result<Option<Field>, Error> {
+    pub fn new_oneof(attrs: &[Attribute]) -> Result<Option<Field>, Error> {
         let attrs = prost_attrs(attrs);
 
         // TODO: check for ignore attribute.
@@ -88,19 +88,19 @@ impl Field {
     }
 
     /// Returns a statement which encodes the field.
-    pub fn encode(&self, ident: TokenStream) -> TokenStream {
+    pub fn encode(&self, ident: &TokenStream) -> TokenStream {
         match *self {
             Field::Scalar(ref scalar) => scalar.encode(ident),
             Field::Message(ref message) => message.encode(ident),
             Field::Map(ref map) => map.encode(ident),
-            Field::Oneof(ref oneof) => oneof.encode(ident),
+            Field::Oneof(ref _oneof) => oneof::Field::encode(ident),
             Field::Group(ref group) => group.encode(ident),
         }
     }
 
     /// Returns an expression which evaluates to the result of merging a decoded
     /// value into the field.
-    pub fn merge(&self, ident: TokenStream) -> TokenStream {
+    pub fn merge(&self, ident: &TokenStream) -> TokenStream {
         match *self {
             Field::Scalar(ref scalar) => scalar.merge(ident),
             Field::Message(ref message) => message.merge(ident),
@@ -111,7 +111,7 @@ impl Field {
     }
 
     /// Returns an expression which evaluates to the encoded length of the field.
-    pub fn encoded_len(&self, ident: TokenStream) -> TokenStream {
+    pub fn encoded_len(&self, ident: &TokenStream) -> TokenStream {
         match *self {
             Field::Scalar(ref scalar) => scalar.encoded_len(ident),
             Field::Map(ref map) => map.encoded_len(ident),
@@ -122,28 +122,29 @@ impl Field {
     }
 
     /// Returns a statement which clears the field.
-    pub fn clear(&self, ident: TokenStream) -> TokenStream {
+    pub fn clear(&self, ident: &TokenStream) -> TokenStream {
         match *self {
             Field::Scalar(ref scalar) => scalar.clear(ident),
             Field::Message(ref message) => message.clear(ident),
-            Field::Map(ref map) => map.clear(ident),
-            Field::Oneof(ref oneof) => oneof.clear(ident),
+            Field::Map(ref _map) => map::Field::clear(ident),
+            Field::Oneof(ref _oneof) => oneof::Field::clear(ident),
             Field::Group(ref group) => group.clear(ident),
         }
     }
 
     pub fn default(&self) -> TokenStream {
-        match *self {
-            Field::Scalar(ref scalar) => scalar.default(),
-            _ => quote!(::core::default::Default::default()),
+        if let Field::Scalar(ref scalar) = *self { 
+            scalar.default() 
+        } else { 
+            quote!(::core::default::Default::default()) 
         }
     }
 
     /// Produces the fragment implementing debug for the given field.
-    pub fn debug(&self, ident: TokenStream) -> TokenStream {
+    pub fn debug(&self, ident: &TokenStream) -> TokenStream {
         match *self {
             Field::Scalar(ref scalar) => {
-                let wrapper = scalar.debug(quote!(ScalarWrapper));
+                let wrapper = scalar.debug(&quote!(ScalarWrapper));
                 quote! {
                     {
                         #wrapper
@@ -152,7 +153,7 @@ impl Field {
                 }
             }
             Field::Map(ref map) => {
-                let wrapper = map.debug(quote!(MapWrapper));
+                let wrapper = map.debug(&quote!(MapWrapper));
                 quote! {
                     {
                         #wrapper
@@ -224,7 +225,7 @@ impl fmt::Display for Label {
 }
 
 /// Get the items belonging to the 'prost' list attribute, e.g. `#[prost(foo, bar="baz")]`.
-fn prost_attrs(attrs: Vec<Attribute>) -> Vec<Meta> {
+fn prost_attrs(attrs: &[Attribute]) -> Vec<Meta> {
     attrs
         .iter()
         .flat_map(Attribute::parse_meta)
@@ -261,10 +262,9 @@ where
 pub fn set_bool(b: &mut bool, message: &str) -> Result<(), Error> {
     if *b {
         bail!("{}", message);
-    } else {
-        *b = true;
-        Ok(())
     }
+    *b = true;
+    Ok(())
 }
 
 /// Unpacks an attribute into a (key, boolean) pair, returning the boolean value.
@@ -296,7 +296,7 @@ fn bool_attr(key: &str, attr: &Meta) -> Result<Option<bool>, Error> {
             lit: Lit::Bool(LitBool { value, .. }),
             ..
         }) => Ok(Some(value)),
-        _ => bail!("invalid {} attribute", key),
+        Meta::NameValue(_) => bail!("invalid {} attribute", key),
     }
 }
 
@@ -332,7 +332,7 @@ pub(super) fn tag_attr(attr: &Meta) -> Result<Option<u32>, Error> {
             Lit::Int(ref lit) => Ok(Some(lit.base10_parse()?)),
             _ => bail!("invalid tag attribute: {:?}", attr),
         },
-        _ => bail!("invalid tag attribute: {:?}", attr),
+        Meta::Path(_) => bail!("invalid tag attribute: {:?}", attr),
     }
 }
 

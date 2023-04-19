@@ -63,13 +63,11 @@ impl Field {
         let has_default = default.is_some();
         let default = default.map_or_else(
             || Ok(DefaultValue::new(&ty)),
-            |lit| DefaultValue::from_lit(&ty, lit),
+            |lit| DefaultValue::from_lit(&ty, &lit),
         )?;
 
         let kind = match (label, packed, has_default) {
-            (None, Some(true), _)
-            | (Some(Label::Optional), Some(true), _)
-            | (Some(Label::Required), Some(true), _) => {
+            (None | Some(Label::Optional | Label::Required), Some(true), _) => {
                 bail!("packed attribute may only be applied to repeated fields");
             }
             (Some(Label::Repeated), Some(true), _) if !ty.is_numeric() => {
@@ -107,7 +105,7 @@ impl Field {
         }
     }
 
-    pub fn encode(&self, ident: TokenStream) -> TokenStream {
+    pub fn encode(&self, ident: &TokenStream) -> TokenStream {
         let module = self.ty.module();
         let encode_fn = match self.kind {
             Kind::Plain(..) | Kind::Optional(..) | Kind::Required(..) => quote!(encode),
@@ -139,7 +137,7 @@ impl Field {
 
     /// Returns an expression which evaluates to the result of merging a decoded
     /// scalar value into the field.
-    pub fn merge(&self, ident: TokenStream) -> TokenStream {
+    pub fn merge(&self, ident: &TokenStream) -> TokenStream {
         let module = self.ty.module();
         let merge_fn = match self.kind {
             Kind::Plain(..) | Kind::Optional(..) | Kind::Required(..) => quote!(merge),
@@ -161,7 +159,7 @@ impl Field {
     }
 
     /// Returns an expression which evaluates to the encoded length of the field.
-    pub fn encoded_len(&self, ident: TokenStream) -> TokenStream {
+    pub fn encoded_len(&self, ident: &TokenStream) -> TokenStream {
         let module = self.ty.module();
         let encoded_len_fn = match self.kind {
             Kind::Plain(..) | Kind::Optional(..) | Kind::Required(..) => quote!(encoded_len),
@@ -191,7 +189,7 @@ impl Field {
         }
     }
 
-    pub fn clear(&self, ident: TokenStream) -> TokenStream {
+    pub fn clear(&self, ident: &TokenStream) -> TokenStream {
         match self.kind {
             Kind::Plain(ref default) | Kind::Required(ref default) => {
                 let default = default.typed();
@@ -215,7 +213,7 @@ impl Field {
     }
 
     /// An inner debug wrapper, around the base type.
-    fn debug_inner(&self, wrap_name: TokenStream) -> TokenStream {
+    fn debug_inner(&self, wrap_name: &TokenStream) -> TokenStream {
         if let Ty::Enumeration(ref ty) = self.ty {
             quote! {
                 struct #wrap_name<'a>(&'a i32);
@@ -236,8 +234,8 @@ impl Field {
     }
 
     /// Returns a fragment for formatting the field `ident` in `Debug`.
-    pub fn debug(&self, wrapper_name: TokenStream) -> TokenStream {
-        let wrapper = self.debug_inner(quote!(Inner));
+    pub fn debug(&self, wrapper_name: &TokenStream) -> TokenStream {
+        let wrapper = self.debug_inner(&quote!(Inner));
         let inner_ty = self.ty.rust_type();
         match self.kind {
             Kind::Plain(_) | Kind::Required(_) => self.debug_inner(wrapper_name),
@@ -276,23 +274,21 @@ impl Field {
         }
 
         // Prepend `get_` for getter methods of tuple structs.
-        let get = match syn::parse_str::<Index>(&ident_str) {
-            Ok(index) => {
-                let get = Ident::new(&format!("get_{}", index.index), Span::call_site());
-                quote!(#get)
-            }
-            Err(_) => quote!(#ident),
+        let get = if let Ok(index) = syn::parse_str::<Index>(&ident_str) {
+            let get = Ident::new(&format!("get_{}", index.index), Span::call_site());
+            quote!(#get)
+        } else {
+            quote!(#ident)
         };
-
+        
         if let Ty::Enumeration(ref ty) = self.ty {
-            let set = Ident::new(&format!("set_{}", ident_str), Span::call_site());
-            let set_doc = format!("Sets `{}` to the provided enum value.", ident_str);
+            let set = Ident::new(&format!("set_{ident_str}"), Span::call_site());
+            let set_doc = format!("Sets `{ident_str}` to the provided enum value.");
             Some(match self.kind {
                 Kind::Plain(ref default) | Kind::Required(ref default) => {
                     let get_doc = format!(
-                        "Returns the enum value of `{}`, \
-                         or the default if the field is set to an invalid enum value.",
-                        ident_str,
+                        "Returns the enum value of `{ident_str}`, \
+                         or the default if the field is set to an invalid enum value."
                     );
                     quote! {
                         #[doc=#get_doc]
@@ -308,9 +304,8 @@ impl Field {
                 }
                 Kind::Optional(ref default) => {
                     let get_doc = format!(
-                        "Returns the enum value of `{}`, \
-                         or the default if the field is unset or set to an invalid enum value.",
-                        ident_str,
+                        "Returns the enum value of `{ident_str}`, \
+                         or the default if the field is unset or set to an invalid enum value."
                     );
                     quote! {
                         #[doc=#get_doc]
@@ -326,11 +321,10 @@ impl Field {
                 }
                 Kind::Repeated | Kind::Packed => {
                     let iter_doc = format!(
-                        "Returns an iterator which yields the valid enum values contained in `{}`.",
-                        ident_str,
+                        "Returns an iterator which yields the valid enum values contained in `{ident_str}`.",
                     );
-                    let push = Ident::new(&format!("push_{}", ident_str), Span::call_site());
-                    let push_doc = format!("Appends the provided enum value to `{}`.", ident_str);
+                    let push = Ident::new(&format!("push_{ident_str}"), Span::call_site());
+                    let push_doc = format!("Appends the provided enum value to `{ident_str}`.");
                     quote! {
                         #[doc=#iter_doc]
                         pub fn #get(&self) -> ::core::iter::FilterMap<
@@ -356,8 +350,7 @@ impl Field {
             };
 
             let get_doc = format!(
-                "Returns the value of `{0}`, or the default value if `{0}` is unset.",
-                ident_str,
+                "Returns the value of `{ident_str}`, or the default value if `{ident_str}` is unset."
             );
 
             Some(quote! {
@@ -490,11 +483,11 @@ impl Ty {
             s if s.len() > enumeration_len && &s[..enumeration_len] == "enumeration" => {
                 let s = &s[enumeration_len..].trim();
                 match s.chars().next() {
-                    Some('<') | Some('(') => (),
+                    Some('<' | '(') => (),
                     _ => return error,
                 }
                 match s.chars().next_back() {
-                    Some('>') | Some(')') => (),
+                    Some('>' | ')') => (),
                     _ => return error,
                 }
 
@@ -541,20 +534,13 @@ impl Ty {
         match *self {
             Ty::Double => quote!(f64),
             Ty::Float => quote!(f32),
-            Ty::Int32 => quote!(i32),
-            Ty::Int64 => quote!(i64),
-            Ty::Uint32 => quote!(u32),
-            Ty::Uint64 => quote!(u64),
-            Ty::Sint32 => quote!(i32),
-            Ty::Sint64 => quote!(i64),
-            Ty::Fixed32 => quote!(u32),
-            Ty::Fixed64 => quote!(u64),
-            Ty::Sfixed32 => quote!(i32),
-            Ty::Sfixed64 => quote!(i64),
+            Ty::Int64 | Ty::Sfixed64 | Ty::Sint64 => quote!(i64),
+            Ty::Uint32 | Ty::Fixed32  => quote!(u32),
+            Ty::Uint64 | Ty::Fixed64 => quote!(u64),
             Ty::Bool => quote!(bool),
             Ty::String => quote!(&str),
             Ty::Bytes(..) => quote!(&[u8]),
-            Ty::Enumeration(..) => quote!(i32),
+            Ty::Enumeration(..) | Ty::Int32 | Ty::Sint32 | Ty::Sfixed32 => quote!(i32),
         }
     }
 
@@ -625,7 +611,8 @@ impl DefaultValue {
         }
     }
 
-    pub fn from_lit(ty: &Ty, lit: Lit) -> Result<DefaultValue, Error> {
+    #[allow(clippy::similar_names)]
+    pub fn from_lit(ty: &Ty, lit: &Lit) -> Result<DefaultValue, Error> {
         let is_i32 = *ty == Ty::Int32 || *ty == Ty::Sint32 || *ty == Ty::Sfixed32;
         let is_i64 = *ty == Ty::Int64 || *ty == Ty::Sint64 || *ty == Ty::Sfixed64;
 
@@ -747,7 +734,7 @@ impl DefaultValue {
                 }
                 match syn::parse_str::<Lit>(value) {
                     Ok(Lit::Str(_)) => (),
-                    Ok(lit) => return DefaultValue::from_lit(ty, lit),
+                    Ok(lit) => return DefaultValue::from_lit(ty, &lit),
                     _ => (),
                 }
                 bail!("invalid default value: {}", quote!(#value));

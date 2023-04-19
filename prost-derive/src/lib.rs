@@ -12,12 +12,13 @@ use proc_macro2::Span;
 use quote::quote;
 use syn::{
     punctuated::Punctuated, Data, DataEnum, DataStruct, DeriveInput, Expr, Fields, FieldsNamed,
-    FieldsUnnamed, Ident, Index, Variant,
+    FieldsUnnamed, Ident, Index, Variant, token::Comma,
 };
 
 mod field;
 use crate::field::Field;
 
+#[allow(clippy::cast_possible_truncation)]
 fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     let input: DeriveInput = syn::parse(input)?;
 
@@ -54,26 +55,27 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     let mut fields = fields
         .into_iter()
         .enumerate()
-        .flat_map(|(i, field)| {
-            let field_ident = field.ident.map(|x| quote!(#x)).unwrap_or_else(|| {
+        .filter_map(|(i, field)| {
+            let field_ident = field.ident.map_or_else(|| {
                 let index = Index {
-                    index: i as u32,
+                    index: i as u32, // possible truncation
                     span: Span::call_site(),
                 };
                 quote!(#index)
-            });
-            match Field::new(field.attrs, Some(next_tag)) {
+            }, |x| quote!(#x));
+
+            match Field::new(&field.attrs, Some(next_tag)) {
                 Ok(Some(field)) => {
-                    next_tag = field.tags().iter().max().map(|t| t + 1).unwrap_or(next_tag);
+                    next_tag = field.tags().iter().max().map_or(next_tag, |t| t + 1);
                     Some(Ok((field_ident, field)))
                 }
                 Ok(None) => None,
                 Err(err) => Some(Err(
-                    err.context(format!("invalid message field {}.{}", ident, field_ident))
+                    err.context(format!("invalid message field {ident}.{field_ident}"))
                 )),
             }
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?; // changed flat_map to filter_map
 
     // We want Debug to be in declaration order
     let unsorted_fields = fields.clone();
@@ -82,12 +84,12 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     // TODO: This encodes oneof fields in the position of their lowest tag,
     // regardless of the currently occupied variant, is that consequential?
     // See: https://developers.google.com/protocol-buffers/docs/encoding#order
-    fields.sort_by_key(|&(_, ref field)| field.tags().into_iter().min().unwrap());
+    fields.sort_by_key(|(_, ref field)| field.tags().into_iter().min().unwrap());
     let fields = fields;
 
     let mut tags = fields
         .iter()
-        .flat_map(|&(_, ref field)| field.tags())
+        .flat_map(|(_, ref field)| field.tags())
         .collect::<Vec<_>>();
     let num_tags = tags.len();
     tags.sort_unstable();
@@ -98,14 +100,14 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
 
     let encoded_len = fields
         .iter()
-        .map(|&(ref field_ident, ref field)| field.encoded_len(quote!(self.#field_ident)));
+        .map(|(ref field_ident, ref field)| field.encoded_len(&quote!(self.#field_ident)));
 
     let encode = fields
         .iter()
-        .map(|&(ref field_ident, ref field)| field.encode(quote!(self.#field_ident)));
+        .map(|(ref field_ident, ref field)| field.encode(&quote!(self.#field_ident)));
 
-    let merge = fields.iter().map(|&(ref field_ident, ref field)| {
-        let merge = field.merge(quote!(value));
+    let merge = fields.iter().map(|(ref field_ident, ref field)| {
+        let merge = field.merge(&quote!(value));
         let tags = field.tags().into_iter().map(|tag| quote!(#tag));
         let tags = Itertools::intersperse(tags, quote!(|));
 
@@ -130,7 +132,7 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
 
     let clear = fields
         .iter()
-        .map(|&(ref field_ident, ref field)| field.clear(quote!(self.#field_ident)));
+        .map(|(ref field_ident, ref field)| field.clear(&quote!(self.#field_ident)));
 
     let default = if is_struct {
         let default = fields.iter().map(|(field_ident, field)| {
@@ -150,9 +152,10 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         )}
     };
 
+    // ianmichell: Changed flatmap to filter map.
     let methods = fields
         .iter()
-        .flat_map(|&(ref field_ident, ref field)| field.methods(field_ident))
+        .filter_map(|(ref field_ident, ref field)| field.methods(field_ident))
         .collect::<Vec<_>>();
     let methods = if methods.is_empty() {
         quote!()
@@ -165,8 +168,8 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         }
     };
 
-    let debugs = unsorted_fields.iter().map(|&(ref field_ident, ref field)| {
-        let wrapper = field.debug(quote!(self.#field_ident));
+    let debugs = unsorted_fields.iter().map(|(ref field_ident, ref field)| {
+        let wrapper = field.debug(&quote!(self.#field_ident));
         let call = if is_struct {
             quote!(builder.field(stringify!(#field_ident), &wrapper))
         } else {
@@ -238,6 +241,9 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     Ok(expanded.into())
 }
 
+/// # Panics
+///
+/// Will panic if `try_message` fails to unwrap
 #[proc_macro_derive(Message, attributes(prost))]
 pub fn message(input: TokenStream) -> TokenStream {
     try_message(input).unwrap()
@@ -278,23 +284,20 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
         }
     }
 
-    if variants.is_empty() {
-        panic!("Enumeration must have at least one variant");
-    }
+    assert!(!variants.is_empty(), "Enumeration must have at least one variant");
 
     let default = variants[0].0.clone();
 
     let is_valid = variants
         .iter()
-        .map(|&(_, ref value)| quote!(#value => true));
+        .map(|(_, ref value)| quote!(#value => true));
     let from = variants.iter().map(
-        |&(ref variant, ref value)| quote!(#value => ::core::option::Option::Some(#ident::#variant)),
+        |(ref variant, ref value)| quote!(#value => ::core::option::Option::Some(#ident::#variant)),
     );
 
-    let is_valid_doc = format!("Returns `true` if `value` is a variant of `{}`.", ident);
+    let is_valid_doc = format!("Returns `true` if `value` is a variant of `{ident}`.");
     let from_i32_doc = format!(
-        "Converts an `i32` to a `{}`, or `None` if `value` is not a valid variant.",
-        ident
+        "Converts an `i32` to a `{ident}`, or `None` if `value` is not a valid variant."
     );
 
     let expanded = quote! {
@@ -332,25 +335,15 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
     Ok(expanded.into())
 }
 
+/// # Panics
+///
+/// Will panic if `try_enumeration` fails to unwrap
 #[proc_macro_derive(Enumeration, attributes(prost))]
 pub fn enumeration(input: TokenStream) -> TokenStream {
     try_enumeration(input).unwrap()
 }
 
-fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
-    let input: DeriveInput = syn::parse(input)?;
-
-    let ident = input.ident;
-
-    let variants = match input.data {
-        Data::Enum(DataEnum { variants, .. }) => variants,
-        Data::Struct(..) => bail!("Oneof can not be derived for a struct"),
-        Data::Union(..) => bail!("Oneof can not be derived for a union"),
-    };
-
-    let generics = &input.generics;
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-
+fn variant_fields(variants: Punctuated<Variant, Comma>) -> Result<Vec<(Ident, Field)>, Error> {
     // Map the variants into 'fields'.
     let mut fields: Vec<(Ident, Field)> = Vec::new();
     for Variant {
@@ -370,15 +363,18 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
         if variant_fields.len() != 1 {
             bail!("Oneof enum variants must have a single field");
         }
-        match Field::new_oneof(attrs)? {
+        match Field::new_oneof(&attrs)? {
             Some(field) => fields.push((variant_ident, field)),
             None => bail!("invalid oneof variant: oneof variants may not be ignored"),
         }
     }
+    Ok(fields)
+}
 
+fn assert_no_duplicate_field_tags(fields: &Vec<(Ident, Field)>, ident: &Ident) {
     let mut tags = fields
         .iter()
-        .flat_map(|&(ref variant_ident, ref field)| -> Result<u32, Error> {
+        .flat_map(|(ref variant_ident, ref field)| -> Result<u32, Error> {
             if field.tags().len() > 1 {
                 bail!(
                     "invalid oneof variant {}::{}: oneof variants may only have a single tag",
@@ -391,18 +387,39 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
         .collect::<Vec<_>>();
     tags.sort_unstable();
     tags.dedup();
-    if tags.len() != fields.len() {
-        panic!("invalid oneof {}: variants have duplicate tags", ident);
-    }
 
-    let encode = fields.iter().map(|&(ref variant_ident, ref field)| {
-        let encode = field.encode(quote!(*value));
+    assert!(
+        tags.len() != fields.len(),
+        "invalid oneof {ident}: variants have duplicate tags"
+    );
+}
+
+fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
+    let input: DeriveInput = syn::parse(input)?;
+
+    let ident = input.ident;
+
+    let variants = match input.data {
+        Data::Enum(DataEnum { variants, .. }) => variants,
+        Data::Struct(..) => bail!("Oneof can not be derived for a struct"),
+        Data::Union(..) => bail!("Oneof can not be derived for a union"),
+    };
+
+    let generics = &input.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    let fields = variant_fields(variants)?;
+
+    assert_no_duplicate_field_tags(&fields, &ident);
+
+    let encode = fields.iter().map(|(ref variant_ident, ref field)| {
+        let encode = field.encode(&quote!(*value));
         quote!(#ident::#variant_ident(ref value) => { #encode })
     });
 
-    let merge = fields.iter().map(|&(ref variant_ident, ref field)| {
+    let merge = fields.iter().map(|(ref variant_ident, ref field)| {
         let tag = field.tags()[0];
-        let merge = field.merge(quote!(value));
+        let merge = field.merge(&quote!(value));
         quote! {
             #tag => {
                 match field {
@@ -419,13 +436,13 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
         }
     });
 
-    let encoded_len = fields.iter().map(|&(ref variant_ident, ref field)| {
-        let encoded_len = field.encoded_len(quote!(*value));
+    let encoded_len = fields.iter().map(|(ref variant_ident, ref field)| {
+        let encoded_len = field.encoded_len(&quote!(*value));
         quote!(#ident::#variant_ident(ref value) => #encoded_len)
     });
 
-    let debug = fields.iter().map(|&(ref variant_ident, ref field)| {
-        let wrapper = field.debug(quote!(*value));
+    let debug = fields.iter().map(|(ref variant_ident, ref field)| {
+        let wrapper = field.debug(&quote!(*value));
         quote!(#ident::#variant_ident(ref value) => {
             let wrapper = #wrapper;
             f.debug_tuple(stringify!(#variant_ident))
@@ -479,6 +496,9 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
     Ok(expanded.into())
 }
 
+/// # Panics
+///
+/// Will panic if unwrap fails
 #[proc_macro_derive(Oneof, attributes(prost))]
 pub fn oneof(input: TokenStream) -> TokenStream {
     try_oneof(input).unwrap()
