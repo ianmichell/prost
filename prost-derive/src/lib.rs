@@ -389,7 +389,7 @@ fn assert_no_duplicate_field_tags(fields: &Vec<(Ident, Field)>, ident: &Ident) {
     tags.dedup();
 
     assert!(
-        tags.len() != fields.len(),
+        tags.len() == fields.len(),
         "invalid oneof {ident}: variants have duplicate tags"
     );
 }
